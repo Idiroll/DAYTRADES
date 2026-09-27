@@ -48,7 +48,19 @@ def decide(state, questions):
             data = json.loads(resp.read())
     except urllib.error.HTTPError as err:
         raise SystemExit(f"HTTP {err.code}: {err.read().decode()}")
+    check_typesafe(data, questions)
     return data, (time.perf_counter() - start) * 1000
+
+
+def check_typesafe(resp, questions):
+    """Refuse the answer unless TypeSafe served it and every answer has the type we asked for."""
+    provider = str(resp.get("provider", ""))
+    if "typesafe" not in provider.lower():
+        raise SystemExit(f"Not served by TypeSafe (provider={provider!r}); refusing to use it")
+    for name, q in questions.items():
+        answer = resp.get("answers", {}).get(name)
+        if answer is None or answer.get("type") != q["type"]:
+            raise SystemExit(f"Answer {name!r} missing or wrong type: {answer!r}")
 
 
 # The same three questions asked about every held position.
@@ -104,7 +116,7 @@ def main():
         a = resp["answers"]
         cost = resp.get("usage", {}).get("cost", 0) or 0
         total_cost += cost
-        print(f"\n--- {name} ({ms:.0f} ms, ${cost:.6f}) ---")
+        print(f"\n--- {name} ({ms:.0f} ms, ${cost:.6f}, served by {resp.get('provider')} / {resp.get('model')}) ---")
         print(f"  action:   {a['action']['choice']}  (confidence {a['action'].get('confidence', 0):.2f})")
         print(f"  momentum: {a['momentum']['score']}  (0=fading, 1=flat, 2=strong)")
         print(f"  bad_news: P(yes) = {a['bad_news']['noul']:.2f}")
