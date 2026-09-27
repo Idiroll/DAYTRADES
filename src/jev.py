@@ -67,7 +67,7 @@ def decide(state, questions, retries=4):
             check_typesafe(resp, questions)
             return resp
         except urllib.error.HTTPError as err:
-            if err.code in (429, 500, 502, 503, 504) and attempt < retries:
+            if err.code in (429, 500, 502, 503, 504, 520, 521, 522, 523, 524) and attempt < retries:
                 time.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"HTTP {err.code}: {err.read().decode()[:300]}")
