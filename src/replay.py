@@ -53,18 +53,30 @@ def ask_jev(all_snapshots):
     print(f"Jev: {len(keyed)} states, {len(keyed) - len(todo)} cached, {len(todo)} to ask (~${est:.4f})")
     if est > config.MAX_JEV_COST:
         raise SystemExit(f"Estimated cost ${est:.2f} exceeds MAX_JEV_COST ${config.MAX_JEV_COST}")
-    spent, done = 0.0, 0
-    with cf.ThreadPoolExecutor(config.JEV_WORKERS) as pool:
+    spent, done, failed = 0.0, 0, 0
+    pool = cf.ThreadPoolExecutor(config.JEV_WORKERS)
+    try:
         futures = {pool.submit(jev.decide, s, QUESTIONS): k for k, s in todo.items()}
         for fut in cf.as_completed(futures):
             k = futures[fut]
-            resp = fut.result()
+            try:
+                resp = fut.result()
+            except Exception as err:  # log and skip; a paid answer is never silently lost
+                failed += 1
+                print(f"  Jev call failed ({failed}): {str(err)[:200]}")
+                if failed >= 20:
+                    raise SystemExit("Too many Jev failures; stopping without sending the rest")
+                continue
             jev.save_to_cache(k, resp)
             cache[k] = resp
             spent += resp.get("usage", {}).get("cost", 0) or 0
             done += 1
             if done % 200 == 0:
-                print(f"  {done}/{len(todo)} answered, ${spent:.4f} so far")
+                print(f"  {done}/{len(todo)} answered, ${spent:.4f} so far", flush=True)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)  # never keep paying for queued calls after a stop
+    if failed:
+        raise SystemExit(f"{failed} Jev calls failed; answers so far are cached, re-run to fill the gaps")
     total_cost = sum((cache[k].get("usage", {}).get("cost", 0) or 0) for k in keyed)
     answers = {key: cache[jev._key(state, QUESTIONS)]["answers"] for key, (_, state) in all_snapshots.items()}
     return answers, spent, total_cost

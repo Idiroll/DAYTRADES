@@ -22,7 +22,7 @@ SLIPPAGE = 0.0005          # 0.05% lost on every buy and every sell (spread + fi
 # Jev
 JEV_MODEL = "typesafe/jev-1.13"
 JEV_URL = "https://openrouter.ai/api/alpha/decisions"
-JEV_WORKERS = 8            # parallel calls during replay
+JEV_WORKERS = 4            # parallel calls during replay (8 hit errors under load)
 MAX_JEV_COST = 1.00        # replay refuses to spend more than this (USD)
 
 # Threshold sweep for the Jev strategy (see strategies.py for what each one means).

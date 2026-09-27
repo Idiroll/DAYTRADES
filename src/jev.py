@@ -71,7 +71,7 @@ def decide(state, questions, retries=4):
                 time.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"HTTP {err.code}: {err.read().decode()[:300]}")
-        except (urllib.error.URLError, TimeoutError):
+        except OSError:  # timeouts, dropped connections
             if attempt < retries:
                 time.sleep(2 ** attempt)
                 continue
