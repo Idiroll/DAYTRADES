@@ -54,12 +54,13 @@ def jev_strategy(buy_threshold, sell_threshold):
 
 
 def rules_strategy():
-    """No AI at all: classic momentum rules. Jev has to beat this to be worth anything."""
+    """No AI at all: classic momentum rules. Jev has to beat this to be worth anything.
+    Loosened after the first replay (3 trades in 6 days) so it trades about as often as Jev."""
 
     def signal(f, answers=None):
         return Signal(
-            buy=f["chg15"] >= 0.003 and f["vol_ratio"] >= 1.3 and f["vs_vwap"] > 0 and f["rsi"] < 75,
-            sell=f["chg15"] <= -0.003 or f["vs_vwap"] < 0,
+            buy=f["chg15"] >= 0.002 and f["vol_ratio"] >= 1.0 and f["vs_vwap"] > 0 and f["rsi"] < 75,
+            sell=f["chg15"] <= -0.003 or f["vs_vwap"] < -0.001,
             rank=f["chg15"],
         )
 

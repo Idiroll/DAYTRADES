@@ -8,3 +8,6 @@ __pycache__/
 
 # Downloaded market data and Jev answer cache
 data/
+
+# Local live-bot logs (GitHub Actions keeps them as run artifacts)
+logs/

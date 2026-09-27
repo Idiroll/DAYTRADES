@@ -23,8 +23,15 @@ SLIPPAGE = 0.0005          # 0.05% lost on every buy and every sell (spread + fi
 JEV_MODEL = "typesafe/jev-1.13"
 JEV_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_WORKERS = 4            # parallel calls during replay (8 hit errors under load)
-MAX_JEV_COST = 1.00        # replay refuses to spend more than this (USD)
+MAX_JEV_COST = 1.50        # replay refuses to spend more than this (USD)
 
 # Threshold sweep for the Jev strategy (see strategies.py for what each one means).
 BUY_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9]
 SELL_THRESHOLDS = [0.5, 0.7, 0.9]
+
+# Live paper trading (src/live.py, run by .github/workflows/paper-trade.yml every 5 min)
+LIVE_START = "2026-09-28"      # orders before this date don't count toward the virtual $10
+LIVE_BUY_THRESHOLD = 0.8       # set from the replay results; change here to try another level
+LIVE_SELL_THRESHOLD = 0.9
+LIVE_FLATTEN_AT = "15:45"      # earlier than the replay's 15:55: scheduled runs can start late
+MIN_ORDER_DOLLARS = 1.00       # Alpaca's minimum for fractional (notional) orders

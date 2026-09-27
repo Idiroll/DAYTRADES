@@ -53,47 +53,52 @@ def _iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def fetch_bars(symbols, start, end):
+    """{symbol: [{t, o, h, l, c, v, vw}, ...]} between two UTC datetimes. IEX feed (free, real-time)."""
+    out, token = {}, None
+    while True:
+        params = {"symbols": ",".join(symbols), "timeframe": "1Min", "start": _iso(start),
+                  "end": _iso(end), "feed": "iex", "limit": 10000, "adjustment": "raw"}
+        if token:
+            params["page_token"] = token
+        page = _get(DATA_URL + "/v2/stocks/bars", params)
+        for sym, bars in (page.get("bars") or {}).items():
+            out.setdefault(sym, []).extend(bars)
+        token = page.get("next_page_token")
+        if not token:
+            return out
+
+
+def fetch_news(symbols, start, end):
+    """Headlines between two UTC datetimes: [{created_at, headline, symbols}]."""
+    out, token = [], None
+    while True:
+        params = {"symbols": ",".join(symbols), "start": _iso(start), "end": _iso(end),
+                  "limit": 50, "sort": "asc"}
+        if token:
+            params["page_token"] = token
+        page = _get(DATA_URL + "/v1beta1/news", params)
+        out += [{"created_at": n["created_at"], "headline": n["headline"], "symbols": n["symbols"]}
+                for n in page.get("news", [])]
+        token = page.get("next_page_token")
+        if not token:
+            return out
+
+
+def premarket_start(day):
+    return datetime.fromisoformat(f"{day}T04:00").replace(tzinfo=ET).astimezone(ZoneInfo("UTC"))
+
+
 def bars_for_day(day, symbols):
-    """{symbol: [{t, o, h, l, c, v, vw}, ...]} for regular hours. IEX feed (free)."""
-
-    def fetch():
-        start, end = _utc_window(day)
-        out, token = {}, None
-        while True:
-            params = {"symbols": ",".join(symbols), "timeframe": "1Min", "start": _iso(start),
-                      "end": _iso(end), "feed": "iex", "limit": 10000, "adjustment": "raw"}
-            if token:
-                params["page_token"] = token
-            page = _get(DATA_URL + "/v2/stocks/bars", params)
-            for sym, bars in (page.get("bars") or {}).items():
-                out.setdefault(sym, []).extend(bars)
-            token = page.get("next_page_token")
-            if not token:
-                return out
-
-    return _cached(f"bars_{day}.json", fetch)
+    """A finished day's regular-hours bars, cached."""
+    start, end = _utc_window(day)
+    return _cached(f"bars_{day}.json", lambda: fetch_bars(symbols, start, end))
 
 
 def news_for_day(day, symbols):
-    """Headlines from 04:00 ET (pre-market) to the close: [{created_at, headline, symbols}]."""
-
-    def fetch():
-        _, end = _utc_window(day)
-        start = datetime.fromisoformat(f"{day}T04:00").replace(tzinfo=ET).astimezone(ZoneInfo("UTC"))
-        out, token = [], None
-        while True:
-            params = {"symbols": ",".join(symbols), "start": _iso(start), "end": _iso(end),
-                      "limit": 50, "sort": "asc"}
-            if token:
-                params["page_token"] = token
-            page = _get(DATA_URL + "/v1beta1/news", params)
-            out += [{"created_at": n["created_at"], "headline": n["headline"], "symbols": n["symbols"]}
-                    for n in page.get("news", [])]
-            token = page.get("next_page_token")
-            if not token:
-                return out
-
-    return _cached(f"news_{day}.json", fetch)
+    """A finished day's headlines from 04:00 ET (pre-market) to the close, cached."""
+    _, end = _utc_window(day)
+    return _cached(f"news_{day}.json", lambda: fetch_news(symbols, premarket_start(day), end))
 
 
 def to_et(ts):

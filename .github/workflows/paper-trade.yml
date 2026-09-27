@@ -1,0 +1,61 @@
+# Phase 2: live paper trading with a virtual $10 on Alpaca's paper account.
+# Needs three repository secrets (Settings -> Secrets and variables -> Actions):
+#   OPENROUTER_API_KEY, ALPACA_API_KEY, ALPACA_SECRET_KEY  (Alpaca PAPER keys only)
+name: paper-trade
+
+on:
+  schedule:
+    # Every 5 minutes, 13:00-20:59 UTC, Mon-Fri. Covers US market hours in both
+    # summer and winter time; live.py asks Alpaca whether the market is open.
+    - cron: "*/5 13-20 * * 1-5"
+    # Scorecard after the close (20:30 UTC = 4:30pm EDT / 3:30pm EST, then 21:30 for winter).
+    - cron: "30 20,21 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: paper-trade
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    if: github.event.schedule != '30 20,21 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: One trading cycle
+        run: python3 src/live.py
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      - name: Keep the decision log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ github.run_id }}
+          path: logs/
+          if-no-files-found: ignore
+          retention-days: 90
+
+  scorecard:
+    if: github.event.schedule == '30 20,21 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build scorecard
+        run: python3 src/scorecard.py
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      - name: Commit scorecard if it changed
+        run: |
+          git config user.name "paper-trade bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add reports/paper-trading.md
+          git diff --cached --quiet || (git commit -m "Update paper trading scorecard" && git pull --rebase && git push)
