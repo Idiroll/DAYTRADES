@@ -80,7 +80,15 @@ print(a["action"]["choice"], a["action"]["confidence"], a["momentum"]["score"],
       a["bad_news"]["noul"], resp["usage"]["cost"])
 ```
 
-> ⚠️ **Verify before building.** The request/response shape above comes from OpenRouter's Jev guide as summarized in search results, plus a working third-party example ([vinaychawla-ops/jev-openrouter-example](https://github.com/vinaychawla-ops/jev-openrouter-example), real run on 2026-09-19: 3 questions, ~425 input tokens, **$0.000018**, ~600–900 ms). Before writing real code, make one tiny call and `print(json.dumps(resp, indent=2))` to confirm field names.
+> ✅ **Verified in Phase 0 (`src/hello_jev.py`).** 3 hand-written positions, 3 questions each: every answer was served by `TypeSafe` (model `typesafe/jev-1.13-20260917`) with the requested type. Each call used ~470 input tokens and took 340–600 ms. The 3 calls cost **$0.000059** in total, about **$0.00002 per call**. Confirmed fields: `answers.<name>.choice / .probabilities / .confidence` (choice), `.score / .legend / .probabilities / .confidence` (score, fractional e.g. 1.99), `.noul` (noul), `usage.cost`, `provider`, `model`, `id`.
+>
+> | Test position | Action | Momentum (0–2) | Bad news P(yes) |
+> |---|---|---|---|
+> | Collapsing (guidance cut, CFO resigns) | SELL, confidence 0.99 | 0.03 | 0.96 |
+> | Strong (wins contract, +1.8%) | HOLD, confidence 0.62 | 1.99 | 0.05 |
+> | Boring (flat, no news) | HOLD, confidence 0.40 | 0.99 | 0.04 |
+>
+> **Lesson:** the atomic questions (momentum, bad news) were near-certain, but the bundled HOLD/SELL question was unsure on the calm cases. One likely reason is that its SELL option mixed three reasons, including "gain worth locking in", which partly matches any winning position. This backs the "smart values, dumb glue" rule: decide the action in Python from atomic signals, and leave profit-taking to the hard take-profit rule in code.
 
 ---
 
