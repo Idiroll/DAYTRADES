@@ -5,3 +5,6 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Downloaded market data and Jev answer cache
+data/
