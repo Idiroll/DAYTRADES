@@ -1,169 +1,243 @@
 # DAYTRADES
 
-**An experiment: give a very cheap AI model (JEV) a tiny amount of real money ($10) and let it day trade all day, making many small, fast decisions, to see what happens.**
+**An experiment: give Jev, TypeSafe's "System One" decision model accessed through OpenRouter, a tiny real account ($10). Let it make thousands of fast hold/sell and buy/pass decisions every trading day, and measure whether that beats doing nothing.**
 
-People have already tried handing an AI some money and letting it do what it wants. Some of them built AI day traders to try to earn an income. This project goes further in one direction: **volume and cost.** Most AI trading bots use expensive frontier models and make only a few trades. This one uses JEV, a model cheap enough to call thousands of times a day. It asks simple, narrow questions over and over instead of a few big, open-ended ones.
+People have already tried giving an AI some money and letting it do what it wants, and some built AI day traders to try to earn an income. Those bots almost always use chat LLMs (big, slow, expensive models that write text), so they only make a few decisions. This project goes the other way. **Jev writes no text at all. It's a "smart `if` statement":** you give it data plus typed questions, and it returns typed answers with probabilities in roughly 100–900 ms, for about **$0.00002 per call**. At that price, the bot can re-judge every position and every candidate every minute of the trading day for pocket change.
 
 The question being tested:
 
-> Can a very cheap model, making a large number of simple decisions (hold/sell and buy/pass), beat just holding the market once fees, model costs and trading rules are counted?
+> Can a fast, cheap decision model re-checking hold/sell and buy/pass decisions constantly beat just holding the market once fees, AI cost and trading rules are counted?
 
 ---
 
-## The core idea: two lists, two questions
+## 1. What Jev is (and why it fits this)
 
-The AI never gets an open-ended "what should I do?" question. It only answers two narrow ones, again and again:
+| | Chat LLM (GPT, Claude, …) | **Jev** |
+|---|---|---|
+| Output | Generated text you have to parse | **Typed answers + probabilities**, valid by construction |
+| Speed | Seconds | ~70–900 ms |
+| Price | $ per million tokens, output costs more | **$0.042 / 1M input tokens, output free** |
+| Good at | Writing, reasoning, math | Fast judgment: classifying, routing, ranking, yes/no |
+| Bad at | Cost at high volume | **Math, counting, comparing dates, writing text** |
 
-| List | Contains | Question asked each cycle | Allowed answers |
+Jev answers three kinds of question, and all three can be asked in **one call** (they're evaluated in parallel against the same data):
+
+| Primitive | Asks | Returns | Use in this bot |
 |---|---|---|---|
-| **Holdings** | Stocks the account owns right now | "Keep this position or exit?" | `HOLD` / `SELL` |
-| **Watchlist** | Stocks it could buy | "Enter a position now or not?" | `BUY` / `PASS` |
+| `choice` | Pick one option from a list | winning option + probability for each + confidence | `HOLD` vs `SELL`, `BUY` vs `PASS` |
+| `score` | Where does this sit on an ordered scale? | position on the scale (can be fractional) + probabilities | "How strong is this setup?" weak / ok / strong |
+| `noul` | How likely is this statement true? | P(yes), 0–1 | "Is there bad news about this stock?" |
 
-Each answer also returns a **confidence (0–1)** and a **one-line reason**. These are logged so the results can be studied later.
+**How to think in Jev**, from TypeSafe's docs:
+1. **Make questions atomic.** Each one should be something an expert could answer in seconds.
+2. **Ask everything at once.** Several questions in one call is much cheaper than several calls.
+3. **Smart values, dumb glue.** Jev returns the judgments, and ordinary Python combines them into the final action, e.g. `buy_score = 0.5*setup + 0.3*momentum - 0.4*bad_news`.
 
-Narrow questions keep each call small and cheap. They are also easy to check, and they make it hard for the model to do something unexpected.
+**The big design consequence:** Jev is bad at arithmetic. **Python does all the number-crunching** (price change, volume vs. average, distance from VWAP, P/L). It hands Jev the results as plain words and numbers ("up 2.3% in 15 min, volume 3× normal, position +1.8%"), and Jev only makes the *judgment call*. Jev's biggest advantage over a plain rules bot is probably **reading unstructured text such as news headlines**, so the design includes headlines in the data it sees.
 
 ---
 
-## Architecture
+## 2. Accessing Jev: OpenRouter, not TypeSafe directly
+
+**All Jev calls go through OpenRouter.** We use an OpenRouter API key (`OPENROUTER_API_KEY`), and costs are billed to the OpenRouter account. We do **not** use TypeSafe's own API or the `typesafe-sdk` package.
+
+Important details:
+- Jev on OpenRouter uses the **Decisions API, not chat completions.** The usual `openai`/chat-completions SDKs **will not work.** A plain HTTP POST (`requests`, or even the Python standard library) is all that's needed.
+- **Endpoint:** `POST https://openrouter.ai/api/alpha/decisions` (also offered: a TypeSafe-compatible `POST https://openrouter.ai/api/v1/systemone`). It's labeled **alpha/beta**, so expect changes.
+- **Model id:** `typesafe/jev-1.13` (or the alias `~typesafe/jev-latest`).
+- **Response:** `answers` (one per question), `usage` (tokens **and `cost` in dollars**, which we log on every call), `provider`, `model`, `id`.
+
+Minimal call (standard library only):
+
+```python
+import json, os, urllib.request
+
+def decide(state, questions, model="typesafe/jev-1.13"):
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/alpha/decisions",
+        data=json.dumps({"model": model, "state": state, "questions": questions}).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+state = """AAPL | held position: bought $2.50 at 227.10, now 229.40 (+1.0%)
+Last 15 min: +0.4%, volume 0.8x normal, price 0.3% above VWAP, RSI 64
+Headlines (last hour): none"""
+
+resp = decide(state, {
+    "action":   {"type": "choice", "instructions": "Should a short-term day trader keep or exit this position now?",
+                 "criteria": {"HOLD": "Trend intact, no reason to exit",
+                              "SELL": "Momentum fading, risk rising, or gain worth locking in"}},
+    "momentum": {"type": "score", "instructions": "How strong is the short-term momentum?",
+                 "criteria": ["fading", "flat", "strong"]},
+    "bad_news": {"type": "noul", "instructions": "Do the headlines contain news likely to push this stock down today?"},
+})
+a = resp["answers"]
+print(a["action"]["choice"], a["action"]["confidence"], a["momentum"]["score"],
+      a["bad_news"]["noul"], resp["usage"]["cost"])
+```
+
+> ⚠️ **Verify before building.** The request/response shape above comes from OpenRouter's Jev guide as summarized in search results, plus a working third-party example ([vinaychawla-ops/jev-openrouter-example](https://github.com/vinaychawla-ops/jev-openrouter-example), real run on 2026-09-19: 3 questions, ~425 input tokens, **$0.000018**, ~600–900 ms). Before writing real code, make one tiny call and `print(json.dumps(resp, indent=2))` to confirm field names.
+
+---
+
+## 3. The core loop: two lists, two questions
+
+| List | Contains | Jev question each cycle | Answers |
+|---|---|---|---|
+| **Holdings** | What the account owns right now | "Keep or exit?" | `HOLD` / `SELL` |
+| **Watchlist** | 10–30 liquid tickers it could buy | "Enter now or not?" | `BUY` / `PASS` |
+
+Each ticker gets **one Jev call per cycle** asking a few atomic questions at once (a `choice` for the action, a `score` or two for strength, a `noul` for bad news). Python then combines the answers and applies the risk rules.
 
 ```
-            ┌───────────────────────────────────────────────┐
-            │                SCHEDULER (loop)               │
-            │   runs every N seconds during market hours    │
-            └───────────────┬───────────────────────────────┘
-                            │
+            ┌──────────────────────────────────────────────┐
+            │          SCHEDULER  (every 1–5 min)          │
+            └───────────────┬──────────────────────────────┘
           ┌─────────────────┴─────────────────┐
           ▼                                   ▼
  ┌─────────────────┐                 ┌─────────────────┐
  │  HOLDINGS LOOP  │                 │ WATCHLIST LOOP  │
- │  per position:  │                 │  per candidate: │
- │  HOLD / SELL    │                 │  BUY / PASS     │
  └────────┬────────┘                 └────────┬────────┘
-          │  market snapshot (price, % change, volume,
-          │  short-term indicators, position P/L)
           ▼                                   ▼
  ┌───────────────────────────────────────────────────────┐
- │                 JEV  (the cheap LLM)                  │
- │  small prompt in → strict JSON out                    │
- │  {"action":"SELL","confidence":0.72,"reason":"..."}   │
+ │ PYTHON: fetch prices + headlines, compute indicators, │
+ │ write them as a short plain-text "state"              │
  └───────────────────────────┬───────────────────────────┘
                              ▼
  ┌───────────────────────────────────────────────────────┐
- │        RISK GUARDRAILS  (plain code, not AI)          │
- │  can block or override any AI decision                │
+ │ JEV via OpenRouter Decisions API                      │
+ │ choice(HOLD/SELL or BUY/PASS) + score(s) + noul(s)    │
  └───────────────────────────┬───────────────────────────┘
                              ▼
  ┌───────────────────────────────────────────────────────┐
- │  BROKER API  (paper account first, then real $10)     │
+ │ PYTHON "glue": combine answers → action               │
+ │ act only if confidence ≥ threshold                    │
  └───────────────────────────┬───────────────────────────┘
                              ▼
  ┌───────────────────────────────────────────────────────┐
- │  LOG  every decision, order, fill, and API cost       │
+ │ RISK GUARDRAILS (hard rules, Jev cannot override)     │
+ └───────────────────────────┬───────────────────────────┘
+                             ▼
+ ┌───────────────────────────────────────────────────────┐
+ │ BROKER API (paper first → real $10)  →  LOG everything│
  └───────────────────────────────────────────────────────┘
 ```
 
-### Components
+### Using Jev's probabilities honestly
+Jev says *how sure it is*, and the bot should use that:
+- **Confidence gate:** only trade when `confidence ≥ 0.75` (tune this). "Torn" answers become `HOLD`/`PASS`.
+- **Tie-break by ranking:** if several `BUY`s pass the gate, buy only the top one or two by combined score. The account is tiny.
+- **Asymmetric thresholds:** exiting should be easier than entering, e.g. SELL at ≥ 0.6 but BUY at ≥ 0.8.
 
-1. **Market data feed.** Recent price bars (1-minute or 5-minute), volume and a few simple indicators (e.g. RSI, VWAP distance, % move today). Code computes these numbers before JEV sees them, so the model interprets numbers but never does the math.
-2. **Watchlist builder.** Runs a few times a day, not every cycle. It picks 10–30 liquid, low-priced or fractional-share-friendly tickers (e.g. top volume movers or a fixed list of ETFs and large caps). Sticking to liquid names keeps bid/ask spreads from eating a $10 account.
-3. **JEV decision calls.** One small prompt per ticker per cycle, and the model must answer in strict JSON. If the output doesn't parse, the action is `HOLD` or `PASS`: do nothing.
-4. **Risk guardrails (the most important part).** These are hard-coded rules the AI cannot override:
-   - Max % of the account in any one position (e.g. 25%)
-   - Stop-loss / take-profit per position (e.g. −3% / +5%)
-   - Daily loss limit: if the account is down X% today, stop trading until tomorrow
-   - Minimum confidence to act (e.g. only act when confidence ≥ 0.65)
-   - Cooldown: no re-buying a ticker within N minutes of selling it
-   - Respect regulatory limits (see below)
-   - **Kill switch:** one command that flattens every position and stops the bot
-5. **Broker.** An API-first, commission-free broker with fractional shares and a free paper-trading account (e.g. Alpaca).
-6. **Logger / scorecard.** Every call is recorded with timestamp, ticker, inputs, AI answer, what the guardrails did, order result, and the token cost of the call. This log is the real product of the experiment.
+### Risk guardrails (plain code; Jev can't override them)
+- Max % of the account in one position (e.g. 50% with $10, so at most 2 positions)
+- Hard stop-loss / take-profit per position (e.g. −2% / +3%), checked in code every cycle whatever Jev says
+- Daily loss limit: down X% today → stop until tomorrow
+- Cooldown: no re-buying a ticker within N minutes of selling it
+- Flat by market close (it's a *day* trader, so no overnight positions)
+- Respect regulatory limits (section 5)
+- **Kill switch:** one command sells everything and stops the bot
 
 ---
 
-## Reality check for a $10 account (read before going live)
+## 4. Cost: why Jev makes "constantly running" realistic
 
-These rules shape the design more than the AI does:
+At ~$0.000018–0.00002 per call (about 400–450 input tokens, 3 questions):
 
-- **Pattern Day Trader (PDT) rule (US).** A *margin* account under $25,000 is limited to 3 day trades in any rolling 5 business days. "A TON of day trades" with real money is not allowed in a normal US margin account. (FINRA has been working on changing this rule. Check what's in effect when you run the experiment.)
+| Setup | Calls / day | Jev cost / day | per month (~21 days) |
+|---|---|---|---|
+| 25 tickers, every 5 min (78 cycles) | ~1,950 | **~$0.04** | ~$0.80 |
+| 25 tickers, every 1 min (390 cycles) | ~9,750 | **~$0.20** | ~$4 |
+| Crypto, 10 tickers, every 1 min, 24/7 | ~14,400 | **~$0.29** | ~$9 |
+
+Jev is cheap, but **on a $10 account even $0.04/day is 0.4% of the account every day** (over 8% a month). The bot has to earn more than that just to break even, so AI cost gets **its own line on the scorecard**, read from `usage.cost` on every response. For the $10 live run, start slow (5-minute cycles, a small watchlist). The fast version belongs on paper.
+
+---
+
+## 5. Reality check for a $10 account (read before going live)
+
+- **Pattern Day Trader (PDT) rule (US).** A *margin* account under $25,000 is limited to 3 day trades in any rolling 5 business days. (FINRA has been working on changing this rule. Check what's in effect when you run the test.)
 - **Cash accounts** avoid PDT, but sale proceeds take a day to settle (T+1). Buying with unsettled money and then selling can trigger *good-faith violations*, and several of those get the account restricted.
-- **Crypto trades 24/7 with no PDT rule.** For a true "running all day, constantly trading" test with $10, crypto (e.g. BTC/ETH through the same broker API) may be the more realistic live market. Spreads and fees matter even more there.
-- **Paper trading has no such limits in practice.** The high-frequency version of the idea can be tested there freely.
-- **Fees and spreads.** On $10, a few cents of spread per trade is a large percentage. Log it.
-- **Expectations.** Most human day traders lose money, and $10 will not produce an income even if the bot does well. The goal is to *measure whether the approach has an edge*. If it does, you can scale up later.
+- **Crypto trades 24/7 with no PDT rule.** For a true "running constantly" live test with $10, crypto through a broker API may be the realistic market. Watch spreads and fees closely.
+- **Paper trading** is where the high-volume stock version can run freely.
+- **Spreads and fees:** a few cents per trade is a big percentage of $10.
+- **Expectations:** most day traders lose money, and $10 will not produce an income even if it works. The goal is to *measure whether this approach has an edge* before scaling.
 
-**Practical plan:** run the high-volume version on **paper**, and run the **$10 live** version under the real constraints (limited stock day trades, or crypto).
-
----
-
-## Cost model (why JEV)
-
-The whole idea depends on AI calls being almost free. Rough estimate:
-
-```
-calls per day   = (holdings + watchlist size) × cycles per day
-                = e.g. (5 + 20) × (6.5 hrs × 60 / 5-min cycle = 78)  ≈ 1,950 calls/day
-tokens per call ≈ 400 in + 50 out
-daily AI cost   = calls × tokens × JEV price per token
-```
-
-Put JEV's actual per-token prices into the formula. The rule for the experiment:
-**daily AI cost must stay well below the expected daily profit**, or the bot can't be profitable even when its trades are good. With a $10 account this is a very high bar, so track **AI cost as its own line** on the scorecard.
+**Plan:** high-volume version on **paper**; **$10 live** under real constraints (limited stock day trades, or crypto).
 
 ---
 
-## Test plan
+## 6. Test plan
 
-### Phase 0: Build and replay (no money)
-- Wire up data → JEV → guardrails → logger.
-- **Replay** a few past trading days of 1-minute data through the bot to check the plumbing and the cost per day.
-- Baseline: compare against simple rule-only bots (e.g. "buy if up 1% in 15 min, sell at ±2%") and against **doing nothing / holding SPY**.
+### Phase 0: Hello Jev (no money)
+- Get an OpenRouter key, make one Decisions API call, print the raw response, confirm field names and per-call cost.
+- Feed it 5–10 hand-written "states" (a clearly collapsing stock, a clearly strong one, a boring one) and check the `HOLD`/`SELL` answers make sense.
 
-### Phase 1: Paper trading (2–4 weeks)
-- Run live during market hours on a paper account with a simulated $10 (and optionally $1,000 to get past rounding and fractional-share effects).
-- No real money until this phase ends.
+### Phase 1: Replay (no money)
+- Replay a few past trading days of 1-minute bars through the full loop (data → Jev → glue → guardrails → simulated fills).
+- Compare against baselines: **(a) hold SPY**, **(b) a rules-only bot with no Jev** (e.g. "buy if up 1% in 15 min on 2× volume, exit at ±2%"). If Jev can't beat (b), it isn't adding value.
 
-### Phase 2: Real $10
-- Same code with live keys, and all guardrails turned on.
-- Run for a fixed period (e.g. 4 weeks) and don't change the strategy mid-run.
+### Phase 2: Paper trading (2–4 weeks)
+- Run live during market hours on a free paper account (e.g. Alpaca), simulating $10 (and optionally $1,000 to remove rounding and fractional-share effects).
 
-### Scorecard (what "success" means)
+### Phase 3: Real $10
+- Same code, live keys, every guardrail on, fixed period (e.g. 4 weeks), no strategy changes mid-run.
+
+### Scorecard
 | Metric | Why |
 |---|---|
-| Net P/L after fees **and** AI cost | The only number that really matters |
-| Return vs. holding SPY over the same period | Did it beat doing nothing? |
-| Win rate and average win / average loss | Is there an edge, or just luck? |
+| Net P/L after fees **and Jev cost** | The only number that really matters |
+| Return vs. holding SPY, and vs. the rules-only bot | Did Jev add anything? |
+| Win rate, average win / average loss | Real edge, or luck? |
 | Max drawdown | How bad did it get? |
-| Trades per day | Did the "high volume" idea actually happen? |
-| AI cost per trade | Is JEV really cheap enough? |
-| % of AI decisions blocked by guardrails | Is the AI or the rulebook doing the work? |
+| Trades per day | Did "high volume" actually happen? |
+| Jev cost per day and per trade | From `usage.cost` |
+| Calibration: when Jev said 0.8 confidence, how often was it right? | Are its probabilities meaningful for markets? |
+| % of Jev decisions blocked by guardrails | Is Jev or the rulebook doing the work? |
 
 ---
 
-## Suggested repo layout (to build next)
+## 7. Suggested repo layout (to build next)
 
 ```
 DAYTRADES/
 ├── README.md            ← this file
-├── config.yaml          ← watchlist settings, guardrail limits, cycle speed, paper/live switch
+├── .env                 ← OPENROUTER_API_KEY, broker keys (gitignored, never committed)
+├── config.yaml          ← watchlist, questions, thresholds, guardrail limits, cycle speed, paper/live
 ├── src/
-│   ├── data.py          ← market data + indicator calculation
+│   ├── jev.py           ← OpenRouter Decisions API client + cost tracking
+│   ├── questions.py     ← the Jev question sets (holdings, watchlist)
+│   ├── data.py          ← prices, indicators, headlines → plain-text "state"
 │   ├── watchlist.py     ← picks candidate tickers
-│   ├── brain.py         ← JEV prompts + strict JSON parsing
-│   ├── risk.py          ← guardrails (hard rules, kill switch)
-│   ├── broker.py        ← order placement (paper/live)
-│   ├── logger.py        ← decision + cost log (CSV/SQLite)
-│   └── main.py          ← the scheduler loop
-├── backtest/            ← replay past days through the bot
+│   ├── glue.py          ← combine Jev answers → action (smart values, dumb glue)
+│   ├── risk.py          ← guardrails + kill switch
+│   ├── broker.py        ← orders (paper/live)
+│   ├── logger.py        ← every decision, answer, order, fill, cost (SQLite/CSV)
+│   └── main.py          ← scheduler loop
+├── backtest/            ← replay past days
 └── reports/             ← daily scorecards
 ```
 
-## Open questions
-- Which JEV model/endpoint, and what are its exact per-token prices and rate limits?
-- Stocks (PDT-limited with $10) vs. crypto (24/7, no PDT) for the live run?
-- How fast should a cycle be: 1 min, 5 min, 15 min? Faster means more trades and higher AI cost.
-- Should the model also see news headlines, or only price/volume numbers? (Starting with numbers only keeps it cheap.)
+## 8. Open questions
+- Stocks (PDT-limited at $10) or crypto (24/7, no PDT) for the live run?
+- Cycle speed: 1, 5 or 15 minutes? Faster means more decisions and more Jev cost.
+- Should headlines be included from day one, or should we start with numbers only and add them later to see whether they help?
+- Which broker/data feed (Alpaca's free paper account and data is the default assumption)?
+- How far does Jev's probability calibration carry over to market questions, where the "right answer" is genuinely uncertain? This is what the experiment finds out.
 
 ---
+
+## Sources
+- OpenRouter Jev guide: https://openrouter.ai/docs/guides/community/jev
+- OpenRouter Jev 1.13 model page (pricing): https://openrouter.ai/typesafe/jev-1.13
+- OpenRouter "What is Jev?": https://openrouter.ai/blog/insights/what-is-jev/
+- Working OpenRouter example: https://github.com/vinaychawla-ops/jev-openrouter-example
+- TypeSafe, Introducing System One & Jev: https://typesafe.ai/blog/introducing-system-one-models-and-jev
+- TypeSafe docs, primitives and patterns: https://docs.typesafe.ai/primitives, https://docs.typesafe.ai/patterns
+- Flavio Copes' walkthrough: https://flaviocopes.com/jev/
 
 *This is an experiment, not financial advice. Only put in money you're fine losing entirely.*
